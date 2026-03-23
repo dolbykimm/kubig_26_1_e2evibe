@@ -316,16 +316,19 @@ def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─── 지원자 행 감지 상수 ────────────────────────────────────────
-_APPLICANT_NAME_RE = re.compile(r"^[가-힣]{2,4}$")
+# 이름 시작 부분(2~4 한글) + 뒤에 학번·학과가 붙어있어도 매칭
+_APPLICANT_NAME_RE = re.compile(r"^[가-힣]{2,4}")
 _NUMERIC_RE        = re.compile(r"^\d[\d.\-/]*$")   # 학번·점수·날짜 등 숫자 계열
 _EVALUATOR_LABELS  = frozenset({"면접관", "평가자", "채점자", "평가위원"})
+# 이름 셀 파싱: 이름 뒤에 붙은 학과·학번 분리
+_NAME_CELL_RE      = re.compile(r"^([가-힣]{2,4})")
 
 
 def _looks_like_applicant_row(row: pd.Series) -> bool:
     """
     행이 '지원자 데이터 행'처럼 보이면 True.
-    조건 ① 한국어 이름(2~4자)이 있고
-         ② 숫자 값(학번·점수 등)이 하나 이상 있고          ← 헤더 행 오인 방지
+    조건 ① 한국어 이름(2~4자, 뒤에 학과/학번이 붙어있어도 OK)이 있고
+         ② 숫자 값(학번·점수 등)이 하나 이상 있고   ← 헤더 행 오인 방지
          ③ '면접관' 등 평가자 레이블 문자열이 없을 것
     """
     vals = [
@@ -340,6 +343,29 @@ def _looks_like_applicant_row(row: pd.Series) -> bool:
     has_name    = any(bool(_APPLICANT_NAME_RE.match(v)) for v in vals)
     has_numeric = any(bool(_NUMERIC_RE.match(v))        for v in vals)
     return has_name and has_numeric
+
+
+def _parse_name_cell(raw: str) -> tuple[str, str, str]:
+    """
+    이름 셀에서 (순수이름, 학과힌트, 학번힌트)를 분리한다.
+
+    예)  "박지성(컴공)"       → ("박지성", "컴공", "")
+         "박지성 20240001"    → ("박지성", "",     "20240001")
+         "박지성/통계 2024"   → ("박지성", "통계", "2024")
+         "박지성"             → ("박지성", "",     "")
+    """
+    raw = raw.strip()
+    m = _NAME_CELL_RE.match(raw)
+    if not m:
+        return raw, "", ""
+    name = m.group(1)
+    rest = raw[len(name):].strip().strip("()（）[][]〔〕/|- ")
+    # 숫자 연속열(학번)
+    id_m     = re.search(r"\d{4,}", rest)
+    extra_id = id_m.group(0) if id_m else ""
+    # 나머지 한글 부분(학과 힌트)
+    extra_dept = re.sub(r"\d+", "", rest).strip("()（）[][]〔〕/|- ").strip()
+    return name, extra_dept, extra_id
 
 
 def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -425,9 +451,13 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 return "" if pd.isna(val) else str(val).strip()
 
             학번 = _get(id_idx)
-            이름 = _get(name_idx)
-            학과 = _get(dept_idx)
+            # 이름 셀에 학과·학번이 붙어있을 수 있으므로 분리
+            이름_raw = _get(name_idx)
+            이름, _extra_dept, _extra_id = _parse_name_cell(이름_raw)
+            학과 = _get(dept_idx) or _extra_dept   # 전용 열 없으면 이름 셀에서 보완
             전화 = _get(phone_idx)
+            if not 학번 and _extra_id:
+                학번 = _extra_id                   # 이름 셀에서 학번 보완
             if not 이름 and not 학번:
                 continue
 
