@@ -305,13 +305,47 @@ def _find_header_row(df_raw: pd.DataFrame, max_scan: int = 10) -> int:
 
 def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
     """
-    위에서부터 순회하다 '모든 열이 빈칸(NaN 또는 공백)'인 첫 행을 찾아
-    그 행부터 아래를 모두 제거한다. (하단 평가기준 표 차단)
+    아래에서 위로 스캔해 '모든 열이 빈칸(NaN 또는 공백)'인 꼬리 행들을 제거한다.
+    중간에 있는 빈 행(섹션 구분선 등)은 건드리지 않는다.
     """
-    for i, (_, row) in enumerate(df.iterrows()):
-        if row.apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
-            return df.iloc[:i]
-    return df
+    for i in range(len(df) - 1, -1, -1):
+        row = df.iloc[i]
+        if not row.apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
+            return df.iloc[: i + 1]
+    return df.iloc[:0]
+
+
+# ─── 지원자 행 감지 상수 ────────────────────────────────────────
+_APPLICANT_NAME_RE = re.compile(r"^[가-힣]{2,4}$")
+_HEADER_ONLY_WORDS = frozenset({
+    "이름", "성명", "성함", "학번", "학과", "전화", "번호", "점수", "총점",
+    "합계", "비고", "날짜", "시간", "면접관", "지원자", "대상자", "평가자",
+    "소속", "연락처", "휴대폰", "메모", "항목", "기준", "내용", "서명", "구분",
+    "순번", "합산", "평균", "성적", "결과", "판정", "코멘트", "총평",
+})
+_EVALUATOR_LABELS = frozenset({"면접관", "평가자", "채점자", "평가위원"})
+
+
+def _looks_like_applicant_row(row: pd.Series) -> bool:
+    """
+    행이 '지원자 데이터 행'처럼 보이면 True.
+    조건 ① 한국어 이름(2~4자, 비-헤더 단어)이 있고
+         ② 비어있지 않은 셀이 2개 이상
+         ③ '면접관' 등 평가자 레이블 문자열이 없을 것
+    """
+    vals = [
+        str(v).strip()
+        for v in row
+        if str(v).strip() not in ("", "nan", "NaN", "None")
+    ]
+    if len(vals) < 2:
+        return False
+    if any(lbl in v for v in vals for lbl in _EVALUATOR_LABELS):
+        return False
+    return any(
+        bool(_APPLICANT_NAME_RE.match(v)) and v not in _HEADER_ONLY_WORDS
+        for v in vals
+    )
 
 
 def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -319,33 +353,51 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     모든 시트를 순회하며 (학번, 이름, 학과, 전화번호, 면접_통합데이터) 테이블을 반환한다.
 
     처리 순서 (시트별)
-    ① 동적 헤더 탐색  : 상위 10행 중 ROLE_KEYWORDS 키워드가 가장 많은 행 → 컬럼명으로 설정
-    ② 꼬리 자르기     : 모든 열이 빈칸인 첫 행부터 하단 삭제 (평가기준 표 등 제거)
+    ① 지원자 행 탐색  : 위에서부터 스캔 → 한국어 이름이 처음 나오는 행 = 데이터 시작
+                        직전 행 = 컬럼 헤더 (없으면 ROLE_KEYWORDS 기반 폴백)
+    ② 데이터 블록 추출 : 데이터 시작 ~ 첫 완전-빈 행 직전
     ③ 식별자 열 ffill : 이름·학번 열의 빈칸 → 위 행 값으로 채움 (병합 셀 대응)
     ④ 데이터 수집     : 메타 열 제외 나머지 전체(숫자·텍스트·점수 불문) →
                         "[컬럼명] 값" 형식으로 이어붙여 면접_통합데이터 생성
-    ⑤ 이름 기준 groupby → 여러 행/시트 데이터를 한 사람으로 합산
+    ⑤ 이름·학번 기준 groupby → 여러 행/시트 데이터를 한 사람으로 합산
     """
     all_rows: list[dict] = []
 
     for sheet_name, df_raw in sheets.items():
-        # ① 동적 헤더 탐색
-        header_row = _find_header_row(df_raw)
-        df = df_raw.iloc[header_row + 1:].copy()
-        df.columns = df_raw.iloc[header_row].astype(str).str.strip().tolist()
-        df = df.reset_index(drop=True)
+        # ① 위에서부터 스캔: 지원자 행이 처음 나타나는 위치
+        data_start = None
+        for i in range(len(df_raw)):
+            if _looks_like_applicant_row(df_raw.iloc[i]):
+                data_start = i
+                break
 
-        # ② 꼬리 자르기
-        df = _trim_tail(df)
+        if data_start is None:
+            continue
+
+        # 헤더 행 = data_start 직전 행 (없으면 keyword 기반 폴백)
+        header_row = (data_start - 1) if data_start > 0 else _find_header_row(df_raw)
+
+        # ② 컬럼명 추출 + 데이터 블록 슬라이싱
+        col_names = df_raw.iloc[header_row].astype(str).str.strip().tolist()
+        df_slice  = df_raw.iloc[data_start:].copy().reset_index(drop=True)
+        df_slice.columns = col_names
+
+        # 첫 완전-빈 행까지만 (평가기준 표 등 하단 차단)
+        end_idx = len(df_slice)
+        for j in range(len(df_slice)):
+            if df_slice.iloc[j].apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
+                end_idx = j
+                break
+        df = df_slice.iloc[:end_idx].copy()
+
         if df.empty:
             continue
 
-        # 열 매핑 (이름 기반으로 위치 확정 후 이후는 모두 iloc 사용)
-        cols      = df.columns.tolist()
-        col_map   = resolve_columns(cols)
+        # 열 매핑 → 위치 인덱스 (모든 데이터 접근은 iloc)
+        cols    = df.columns.tolist()
+        col_map = resolve_columns(cols)
 
         def _col_idx(mapped_name: str | None) -> int | None:
-            """매핑된 열 이름의 첫 번째 위치 인덱스를 반환한다."""
             if mapped_name is None:
                 return None
             try:
@@ -358,7 +410,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         dept_idx  = _col_idx(col_map.get("학과"))
         phone_idx = _col_idx(col_map.get("전화번호"))
 
-        # ③ 식별자 열 ffill (병합 셀 대응) — iloc으로 열 지정
+        # ③ 식별자 열 ffill (병합 셀 대응)
         for key_idx in [id_idx, name_idx]:
             if key_idx is not None:
                 df.iloc[:, key_idx] = (
@@ -385,7 +437,6 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
             if not 이름 and not 학번:
                 continue
 
-            # 숫자·점수·텍스트·비고 전부 수집 — 빈 셀·nan만 제외
             parts = []
             for col_i in data_idxs:
                 val = df.iloc[row_i, col_i]
