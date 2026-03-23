@@ -37,9 +37,9 @@ def fetch_llama_models() -> list[str]:
         filtered = sorted(
             m.id for m in models if "llama" in m.id.lower()
         )
-        return filtered if filtered else ["llama3-8b-8192"]
+        return filtered if filtered else ["llama-3.3-70b-versatile"]
     except Exception:
-        return ["llama3-8b-8192"]  # API 실패 시 폴백
+        return ["llama-3.3-70b-versatile"]  # API 실패 시 폴백
 
 
 def analyze_personality(학과: str, 학번: str, 이름: str, 자소서: str, model: str) -> str:
@@ -340,39 +340,58 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if df.empty:
             continue
 
-        # 열 매핑
-        col_map   = resolve_columns(list(df.columns))
-        id_col    = col_map.get("학번")
-        name_col  = col_map.get("이름")
-        dept_col  = col_map.get("학과")
-        phone_col = col_map.get("전화번호")
+        # 열 매핑 (이름 기반으로 위치 확정 후 이후는 모두 iloc 사용)
+        cols      = df.columns.tolist()
+        col_map   = resolve_columns(cols)
 
-        # ③ 식별자 열 ffill (병합 셀 대응)
-        for key_col in [id_col, name_col]:
-            if key_col and key_col in df.columns:
-                df[key_col] = df[key_col].replace(
-                    r"^\s*$", pd.NA, regex=True
-                ).ffill()
+        def _col_idx(mapped_name: str | None) -> int | None:
+            """매핑된 열 이름의 첫 번째 위치 인덱스를 반환한다."""
+            if mapped_name is None:
+                return None
+            try:
+                return cols.index(mapped_name)
+            except ValueError:
+                return None
 
-        meta_cols = {c for c in [id_col, name_col, dept_col, phone_col] if c}
-        data_cols = [c for c in df.columns if c not in meta_cols]
+        id_idx    = _col_idx(col_map.get("학번"))
+        name_idx  = _col_idx(col_map.get("이름"))
+        dept_idx  = _col_idx(col_map.get("학과"))
+        phone_idx = _col_idx(col_map.get("전화번호"))
 
-        # ④ 행별 데이터 수집
-        for _, row in df.iterrows():
-            학번 = str(row[id_col]).strip()    if id_col    else ""
-            이름 = str(row[name_col]).strip()  if name_col  else ""
-            학과 = str(row[dept_col]).strip()  if dept_col  else ""
-            전화 = str(row[phone_col]).strip() if phone_col else ""
+        # ③ 식별자 열 ffill (병합 셀 대응) — iloc으로 열 지정
+        for key_idx in [id_idx, name_idx]:
+            if key_idx is not None:
+                df.iloc[:, key_idx] = (
+                    df.iloc[:, key_idx]
+                    .replace(r"^\s*$", pd.NA, regex=True)
+                    .ffill()
+                )
+
+        meta_idxs = {i for i in [id_idx, name_idx, dept_idx, phone_idx] if i is not None}
+        data_idxs = [i for i in range(len(cols)) if i not in meta_idxs]
+
+        # ④ 행별 데이터 수집 — 모든 셀 접근은 df.iloc[row_i, col_i]
+        for row_i in range(len(df)):
+            def _get(idx: int | None) -> str:
+                if idx is None:
+                    return ""
+                val = df.iloc[row_i, idx]
+                return "" if pd.isna(val) else str(val).strip()
+
+            학번 = _get(id_idx)
+            이름 = _get(name_idx)
+            학과 = _get(dept_idx)
+            전화 = _get(phone_idx)
             if not 이름 and not 학번:
                 continue
 
             # 숫자·점수·텍스트·비고 전부 수집 — 빈 셀·nan만 제외
-            text = "\n".join(
-                f"[{str(col).strip()}] {str(row[col]).strip()}"
-                for col in data_cols
-                if pd.notna(row[col])
-                and str(row[col]).strip() not in ("", "nan", "NaN", "None")
-            )
+            parts = []
+            for col_i in data_idxs:
+                val = df.iloc[row_i, col_i]
+                if pd.notna(val) and str(val).strip() not in ("", "nan", "NaN", "None"):
+                    parts.append(f"[{str(cols[col_i]).strip()}] {str(val).strip()}")
+            text = "\n".join(parts)
             if not text:
                 continue
 
