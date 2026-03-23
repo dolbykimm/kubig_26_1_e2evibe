@@ -330,25 +330,43 @@ def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─── 지원자 이름 감지 상수 ──────────────────────────────────────
-_NAME_PREFIX_RE = re.compile(r"^[가-힣]{2,4}")    # 이름 감지용 (prefix — 뒤에 학과 등 붙어도 OK)
+_NAME_PREFIX_RE = re.compile(r"^([가-힣]{2,4})")  # 이름 파싱용 (prefix)
+# 한국 성씨 목록 — 이름은 반드시 성씨로 시작한다는 점을 활용해 "활발함" 같은 코멘트 단어를 걸러냄
+_KR_SURNAMES    = frozenset(
+    "김이박최정강조윤장임한오서신권황안송류전홍고문손양배백허유남심노하곽성차주우구나민"
+    "변엄원천방공현함변여추도소석길승라모봉표망제경은편심봉"
+)
 # 이름 열 헤더 레이블: 이 값만 있는 행은 data_start 후보에서 제외
 _HEADER_NAMES   = frozenset({"이름", "성명", "성함", "지원자", "대상자"})
 
 
+def _is_korean_name(v: str) -> bool:
+    """
+    셀 값이 한국 이름처럼 보이면 True.
+    조건: ① 한글 2~4자로 시작하고 ② 첫 글자가 한국 성씨 목록에 있을 것.
+    → "활발함"(활: 非성씨), "논리적"(논: 非성씨) 같은 코멘트 단어를 걸러냄.
+    뒤에 "(컴공)", " 20240001" 등이 붙어있어도 OK.
+    """
+    s = v.strip()
+    if s in _HEADER_NAMES or s in ("nan", "NaN", "None", ""):
+        return False
+    m = _NAME_PREFIX_RE.match(s)
+    if not m:
+        return False
+    name_part = m.group(1)
+    return len(name_part) >= 2 and name_part[0] in _KR_SURNAMES
+
+
 def _find_name_col_idx(df_raw: pd.DataFrame) -> int | None:
     """
-    모든 열을 스캔해 한국어 이름(2~4자 한글 시작, 뒤에 학과 등이 붙어도 OK) 패턴이
-    가장 많이 나타나는 열 인덱스를 반환한다.
-    헤더 레이블("이름","성명" 등)은 카운트에서 제외.
+    모든 열을 스캔해 '_is_korean_name' 판정 셀이 가장 많은 열 인덱스를 반환한다.
     최소 2개 이상인 열에서만 선택.
     """
     best_col, best_count = None, 0
     for ci in range(len(df_raw.columns)):
         cnt = sum(
             1 for v in df_raw.iloc[:, ci].astype(str)
-            if bool(_NAME_PREFIX_RE.match(v.strip()))
-            and v.strip() not in ("nan", "NaN", "None", "")
-            and v.strip() not in _HEADER_NAMES
+            if _is_korean_name(v)
         )
         if cnt > best_count:
             best_count, best_col = cnt, ci
@@ -412,8 +430,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         #    (헤더 레이블 "이름"/"성명" 등은 건너뜀)
         data_start: int | None = None
         for i in range(len(df_raw)):
-            v = str(df_raw.iloc[i, name_col_raw]).strip()
-            if bool(_NAME_PREFIX_RE.match(v)) and v not in _HEADER_NAMES:
+            if _is_korean_name(str(df_raw.iloc[i, name_col_raw])):
                 data_start = i
                 break
         if data_start is None:
