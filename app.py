@@ -364,10 +364,10 @@ def _parse_name_cell(raw: str) -> tuple[str, str, str]:
          "박지성"             → ("박지성", "",     "")
     """
     raw = raw.strip()
-    m = _NAME_CELL_RE.match(raw)
+    m = _NAME_PREFIX_RE.match(raw)
     if not m:
         return raw, "", ""
-    name = m.group(1)
+    name = m.group(0)
     rest = raw[len(name):].strip().strip("()（）[][]〔〕/|- ")
     # 숫자 연속열(학번)
     id_m     = re.search(r"\d{4,}", rest)
