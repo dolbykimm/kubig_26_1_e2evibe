@@ -285,22 +285,6 @@ def infer_sheet_structure(summary: str, model: str) -> str:
     return resp.choices[0].message.content.strip()
 
 
-def dept_abbrev_match(short: str, long: str) -> bool:
-    """
-    학과 약어/줄임말 매칭.
-    short 의 각 글자가 long 안에 순서대로 등장하면 True.
-    예) "보정관" → "보건정책관리학부"  (보…정…관 순서 확인)
-    """
-    s = short.strip().replace(" ", "")
-    l = long.strip().replace(" ", "")
-    if not s or not l:
-        return False
-    if s == l or s in l:
-        return True
-    # 순서 보존 부분 수열(subsequence) 검사
-    it = iter(l)
-    return all(ch in it for ch in s)
-
 
 def _find_header_row(df_raw: pd.DataFrame, max_scan: int = 10) -> int:
     """
@@ -577,76 +561,39 @@ def smart_merge(
     df_comments: pd.DataFrame,
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
-    다중 조건 자동 병합 + 동명이인 감지.
-
-    매칭 우선순위
-    1. 학번 완전 일치 → 확정
-    2. 이름 일치 + (학과 약어 매칭 OR 전화번호 일치) → 확정
-    3. 이름 일치 + 후보 1명뿐 → 확정
-    4. 나머지 → ambiguous 목록에 추가
-
-    Returns
-    -------
-    df_merged  : df_base + 면접_통합데이터 열 (자동 확정분만 채워짐)
-    ambiguous  : 수동 해결이 필요한 케이스 목록
-        [{"comment_idx": int, "name": str, "comment_text": str,
-          "candidates": [{"base_idx": int, "label": str}, ...]}, ...]
+    병합 규칙:
+    1. 학번 완전 일치 → 자동 확정
+    2. 이름 일치 + 후보 1명 → 자동 확정
+    3. 동명이인(후보 2명+) → 전원 수동 처리
     """
     df_merged = df_base.copy()
     df_merged["면접_통합데이터"] = None
     ambiguous: list[dict] = []
 
-    has_phone_in_base = "전화번호" in df_base.columns
-
     for c_idx, c_row in df_comments.iterrows():
         c_이름  = str(c_row["이름"]).strip()
         c_학번  = str(c_row.get("학번", "")).strip()
-        c_학과  = str(c_row.get("학과", "")).strip()
-        c_전화  = re.sub(r"\D", "", str(c_row.get("전화번호", "")))
         comment = str(c_row["면접_통합데이터"])
 
-        # 이름이 일치하는 후보 행들
-        name_mask = df_base["이름"].astype(str).str.strip() == c_이름
+        name_mask  = df_base["이름"].astype(str).str.strip() == c_이름
         candidates = df_base[name_mask]
 
         if candidates.empty:
             continue
 
-        # ── 우선순위 1: 학번 완전 일치 ──────────────────────
+        # 학번 완전 일치 → 자동 확정
         if c_학번:
             exact = candidates[candidates["학번"].astype(str).str.strip() == c_학번]
             if len(exact) == 1:
                 df_merged.at[exact.index[0], "면접_통합데이터"] = comment
                 continue
 
-        # ── 우선순위 2: 학과 약어 매칭 ──────────────────────
-        if c_학과 and len(candidates) > 1:
-            dept_match = candidates[
-                candidates["학과"].astype(str).apply(
-                    lambda d: dept_abbrev_match(c_학과, d) or dept_abbrev_match(d, c_학과)
-                )
-            ]
-            if len(dept_match) == 1:
-                df_merged.at[dept_match.index[0], "면접_통합데이터"] = comment
-                continue
-
-        # ── 우선순위 2b: 전화번호 일치 ──────────────────────
-        if c_전화 and has_phone_in_base and len(candidates) > 1:
-            phone_match = candidates[
-                candidates["전화번호"].astype(str).apply(
-                    lambda p: re.sub(r"\D", "", p) == c_전화
-                )
-            ]
-            if len(phone_match) == 1:
-                df_merged.at[phone_match.index[0], "면접_통합데이터"] = comment
-                continue
-
-        # ── 우선순위 3: 후보 1명 ────────────────────────────
+        # 후보 1명 → 자동 확정
         if len(candidates) == 1:
             df_merged.at[candidates.index[0], "면접_통합데이터"] = comment
             continue
 
-        # ── 해결 불가 → ambiguous ───────────────────────────
+        # 동명이인 → 수동 처리
         ambiguous.append({
             "comment_idx":  c_idx,
             "name":         c_이름,
