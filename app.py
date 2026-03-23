@@ -317,20 +317,15 @@ def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
 
 # ─── 지원자 행 감지 상수 ────────────────────────────────────────
 _APPLICANT_NAME_RE = re.compile(r"^[가-힣]{2,4}$")
-_HEADER_ONLY_WORDS = frozenset({
-    "이름", "성명", "성함", "학번", "학과", "전화", "번호", "점수", "총점",
-    "합계", "비고", "날짜", "시간", "면접관", "지원자", "대상자", "평가자",
-    "소속", "연락처", "휴대폰", "메모", "항목", "기준", "내용", "서명", "구분",
-    "순번", "합산", "평균", "성적", "결과", "판정", "코멘트", "총평",
-})
-_EVALUATOR_LABELS = frozenset({"면접관", "평가자", "채점자", "평가위원"})
+_NUMERIC_RE        = re.compile(r"^\d[\d.\-/]*$")   # 학번·점수·날짜 등 숫자 계열
+_EVALUATOR_LABELS  = frozenset({"면접관", "평가자", "채점자", "평가위원"})
 
 
 def _looks_like_applicant_row(row: pd.Series) -> bool:
     """
     행이 '지원자 데이터 행'처럼 보이면 True.
-    조건 ① 한국어 이름(2~4자, 비-헤더 단어)이 있고
-         ② 비어있지 않은 셀이 2개 이상
+    조건 ① 한국어 이름(2~4자)이 있고
+         ② 숫자 값(학번·점수 등)이 하나 이상 있고          ← 헤더 행 오인 방지
          ③ '면접관' 등 평가자 레이블 문자열이 없을 것
     """
     vals = [
@@ -342,10 +337,9 @@ def _looks_like_applicant_row(row: pd.Series) -> bool:
         return False
     if any(lbl in v for v in vals for lbl in _EVALUATOR_LABELS):
         return False
-    return any(
-        bool(_APPLICANT_NAME_RE.match(v)) and v not in _HEADER_ONLY_WORDS
-        for v in vals
-    )
+    has_name    = any(bool(_APPLICANT_NAME_RE.match(v)) for v in vals)
+    has_numeric = any(bool(_NUMERIC_RE.match(v))        for v in vals)
+    return has_name and has_numeric
 
 
 def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
