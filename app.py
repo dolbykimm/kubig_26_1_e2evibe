@@ -50,9 +50,18 @@ def analyze_personality(학과: str, 학번: str, 이름: str, 자소서: str, m
 [자기소개서]
 {자소서}
 
-위 내용을 바탕으로 이 지원자의 성격을 **외향형** 또는 **내향형** 중 하나로 판단하고,
-그 근거를 2~3문장으로 간결하게 요약해 주세요.
-반드시 첫 줄에 "외향형" 또는 "내향형" 한 단어만 적고, 줄바꿈 후 근거를 작성하세요."""
+이 지원자의 성격을 **외향형** 또는 **내향형** 중 하나로 판단하세요.
+
+[판단 기준 — 반드시 준수]
+- 자기소개서는 자기 자신을 좋게 포장하는 글이므로, 스스로 "활발하다", "사교적이다"라고 쓴 표현은 신뢰도를 낮게 보세요.
+- **외향형**으로 판단하려면 아래 중 하나 이상이 구체적으로 확인되어야 합니다:
+  ① 발표·토론·MC·사회 등 말하는 역할을 자발적으로 맡은 경험
+  ② 동아리·학생회·팀 프로젝트 등 대외 활동이 다수이고 주도적 역할 수행
+  ③ 낯선 사람과의 적극적 소통·네트워킹 경험이 구체적으로 기술됨
+- 위 근거 없이 단순히 긍정적·친화적 서술만 있으면 **내향형**으로 판단하세요.
+- 모호하면 내향형으로 판단하세요.
+
+반드시 첫 줄에 "외향형" 또는 "내향형" 한 단어만 적고, 줄바꿈 후 2~3문장으로 근거를 작성하세요."""
 
     client = get_groq_client()
     response = client.chat.completions.create(
@@ -193,6 +202,21 @@ def assign_seats(
             work.at[idx, "테이블_번호"] = t_num + 1
 
     return work.sort_values("테이블_번호").reset_index(drop=True)
+
+
+def extract_interview_score(text: str) -> str:
+    """면접 통합데이터에서 점수 숫자를 추출해 반환. 못 찾으면 빈 문자열.
+
+    점수는 한 자리 정수(음수 포함)가 대부분이므로
+    [총점]/[합계]/[점수] 레이블 뒤에 오는 -?\\d+ 패턴을 우선 찾는다.
+    레이블이 없으면 빈 문자열 반환.
+    """
+    s = str(text)
+    m = re.search(
+        r"\[(총점|합계|점수|평균|score|total)\]\s*(-?[0-9]+(?:\.[0-9]+)?)",
+        s, re.IGNORECASE
+    )
+    return m.group(2) if m else ""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -630,17 +654,24 @@ def reanalyze_final(
     면접_통합데이터: str,
     model: str,
 ) -> str:
-    """자소서 기반 판정 + 면접 통합 데이터를 종합해 최종 한 줄로 요약한다."""
+    """자소서 기반 판정 + 면접 통합 데이터를 종합해 최종 성격을 판단한다."""
     prompt = (
         f"지원자: {이름}\n\n"
-        f"[자소서 기반 성격 판정]\n{성격_판정} — {근거}\n\n"
-        f"[면접 원시 데이터]\n{str(면접_통합데이터).strip()}\n\n"
-        "위 면접 데이터에는 점수, 코멘트, 평가 항목이 섞여 있습니다. "
-        "문맥을 파악해 ① 이 지원자의 면접 성적 수준(상위권/중간권/하위권)과 "
-        "② 면접관의 주요 평가를 스스로 추출하세요. "
-        "그 후 자소서 판정과 종합하여 최종 성격을 판단하되, "
-        "면접 성적은 10% 수준의 참고 정보로만 반영하세요.\n"
-        "첫 줄에 '외향형' 또는 '내향형'만 쓰고, 줄바꿈 후 한 문장으로 근거를 작성하세요."
+        f"[자소서 기반 1차 판정 (참고용)]\n{성격_판정} — {근거}\n\n"
+        f"[면접 현장 데이터]\n{str(면접_통합데이터).strip()}\n\n"
+        "위 데이터를 바탕으로 다음 기준에 따라 최종 성격을 판단하세요.\n\n"
+        "[판단 가중치]\n"
+        "• 면접관 코멘트·비고 (가장 중요): '말이 많다', '적극적', '활발', '조용하다', '소극적' 등 직접 관찰 표현을 최우선 근거로 삼으세요.\n"
+        "• 면접 점수 (중간 비중): 점수가 높으면 면접 현장에서 자신을 잘 표현했다는 뜻이므로 외향 가능성을 높이는 근거가 됩니다. 단, 점수만으로 외향형을 단정하지는 마세요.\n"
+        "• 자소서 1차 판정 (낮은 비중): 면접 데이터와 충돌하면 면접 데이터를 우선하세요.\n\n"
+        "[외향형 판정 조건] 아래 중 하나 이상 해당될 때:\n"
+        "  ① 면접관이 '활발', '말이 많다', '적극적' 등 긍정적 에너지를 직접 언급\n"
+        "  ② 면접 점수가 뚜렷하게 높고(상위권) 코멘트도 긍정적\n"
+        "  ③ 두 근거가 모두 약하면 내향형으로 판단하세요.\n\n"
+        "다음 형식으로 정확히 3줄만 출력하세요:\n"
+        "1줄: '외향형' 또는 '내향형' 한 단어\n"
+        "2줄: 이 사람을 대표하는 성격 키워드를 쉼표로 나열 (예: 발표경험 多, 적극적, 리더십) — 20자 이내\n"
+        "3줄: 판정 근거 한 문장"
     )
 
     client = get_groq_client()
@@ -654,9 +685,16 @@ def reanalyze_final(
 
 
 def to_final_excel_bytes(df: pd.DataFrame) -> bytes:
+    # 원하는 열 순서: 성격판정 → 키워드 → 평균점수 → 근거 → 면접데이터 → 나머지
+    preferred = ["최종_성격_판정", "성격_키워드", "면접_평균점수", "최종_근거", "면접_통합데이터"]
+    # 실제로 df에 존재하는 열만 preferred 순서로, 없는 열은 끝에 추가
+    ordered = [c for c in preferred if c in df.columns]
+    rest    = [c for c in df.columns if c not in ordered]
+    df_out  = df[rest + ordered]
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="최종_분석")
+        df_out.to_excel(writer, index=False, sheet_name="최종_분석")
     return buf.getvalue()
 
 
@@ -1083,28 +1121,31 @@ with tab2:
             ):
                 df_final = df_merged.copy()
                 df_final["최종_성격_판정"] = df_final["성격 판정"]
+                df_final["성격_키워드"]   = ""
+                df_final["면접_평균점수"] = ""
                 df_final["최종_근거"]     = df_final["근거 요약"]
 
                 targets  = df_final[df_final["면접_통합데이터"].notna()]
                 progress = st.progress(0, text="재분석 중...")
 
                 for i, (idx, row) in enumerate(targets.iterrows()):
+                    raw_comment = str(row["면접_통합데이터"]).strip()
                     try:
                         result = reanalyze_final(
                             이름=str(row["이름"]).strip(),
                             성격_판정=str(row["성격 판정"]).strip(),
                             근거=str(row["근거 요약"]).strip(),
-                            면접_통합데이터=str(row["면접_통합데이터"]).strip(),
+                            면접_통합데이터=raw_comment,
                             model=selected_model,
                         )
-                        lines = result.splitlines()
-                        df_final.at[idx, "최종_성격_판정"] = lines[0].strip()
-                        df_final.at[idx, "최종_근거"] = " ".join(
-                            l.strip() for l in lines[1:] if l.strip()
-                        )
+                        lines = [l.strip() for l in result.splitlines() if l.strip()]
+                        df_final.at[idx, "최종_성격_판정"] = lines[0] if len(lines) > 0 else ""
+                        df_final.at[idx, "성격_키워드"]   = lines[1] if len(lines) > 1 else ""
+                        df_final.at[idx, "최종_근거"]     = lines[2] if len(lines) > 2 else (lines[1] if len(lines) > 1 else "")
                     except Exception as e:
                         df_final.at[idx, "최종_근거"] = f"오류: {e}"
 
+                    df_final.at[idx, "면접_평균점수"] = extract_interview_score(raw_comment)
                     progress.progress((i + 1) / len(targets), text=f"재분석 중... ({i+1}/{len(targets)})")
 
                 progress.empty()
@@ -1113,6 +1154,7 @@ with tab2:
                 df_for_stage3 = df_final.copy()
                 df_for_stage3["성격 판정"] = df_for_stage3["최종_성격_판정"]
                 df_for_stage3["근거 요약"] = df_for_stage3["최종_근거"]
+                df_for_stage3["성격_키워드"] = df_for_stage3["성격_키워드"]
                 st.session_state["df_personality"] = df_for_stage3.drop(
                     columns=["최종_성격_판정", "최종_근거", "면접_통합데이터"], errors="ignore"
                 )
@@ -1219,8 +1261,15 @@ with tab3:
                                 f'<span style="color:{ei_color};font-weight:bold">'
                                 f'{r["EI"]}</span>'
                             )
+                            tooltip = str(r.get("성격_키워드", "")).strip()
+                            if not tooltip or tooltip in ("nan", "None"):
+                                tooltip = ""
+                            name_html = (
+                                f'<span title="{tooltip}" style="cursor:help;'
+                                f'border-bottom:1px dotted #888">{r["이름"]}</span>'
+                            )
                             st.markdown(
-                                f"- {gender_icon} {r['이름']} ({r['학과']} / {r['학번_연도']}학번) {ei_tag}",
+                                f"- {gender_icon} {name_html} ({r['학과']} / {r['학번_연도']}학번) {ei_tag}",
                                 unsafe_allow_html=True,
                             )
 
