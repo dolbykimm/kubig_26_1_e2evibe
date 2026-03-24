@@ -571,17 +571,22 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     df_res["이름"] = df_res["이름"].astype(str).str.strip()
     df_res["학번"] = df_res["학번"].astype(str).str.strip()
 
-    # 같은 사람의 여러 행(병합 셀 분리) 하나로 합치기
-    return (
-        df_res
-        .groupby(["학번", "이름"], as_index=False)
-        .agg({
-            "원본이름":       "first",
-            "학과":           "first",
-            "전화번호":       "first",
-            "면접_통합데이터": lambda x: "\n---\n".join(filter(None, x)),
-        })
+    # cross-sheet 동일인 합산: 학번이 있는 레코드만 groupby로 합침.
+    # 학번이 없는 레코드는 각각 독립 유지 (동명이인 두 명을 한 명으로 합치는 버그 방지).
+    _AGG = {
+        "원본이름":        "first",
+        "학과":            "first",
+        "전화번호":        "first",
+        "면접_통합데이터": lambda x: "\n---\n".join(filter(None, x)),
+    }
+    df_with_id = df_res[df_res["학번"].str.len() > 0]
+    df_no_id   = df_res[df_res["학번"].str.len() == 0]
+
+    merged_id = (
+        df_with_id.groupby(["학번", "이름"], as_index=False).agg(_AGG)
+        if not df_with_id.empty else df_with_id
     )
+    return pd.concat([merged_id, df_no_id], ignore_index=True)
 
 
 def smart_merge(
@@ -1053,6 +1058,8 @@ with tab2:
 
                     with st.container(border=True):
                         st.markdown(info_str)
+                        if not sid:
+                            st.warning("학번 없음 — 원본이름·코멘트 내용으로 직접 구분하세요.")
                         st.caption(preview)
                         st.selectbox(
                             "→ 자소서의 누구와 연결?",
