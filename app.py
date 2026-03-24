@@ -455,10 +455,11 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
             continue
 
         # ── 2. 상태 머신: 헤더 다음 행부터 순회 ─────────────────────
-        current_name  = ""
-        current_id    = ""
-        current_dept  = ""
-        current_phone = ""
+        current_name     = ""
+        current_raw_name = ""
+        current_id       = ""
+        current_dept     = ""
+        current_phone    = ""
         current_parts: list[str] = []
 
         # id/학과/전화 열 인덱스 (헤더에서)
@@ -475,6 +476,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 all_rows.append({
                     "학번":        current_id,
                     "이름":        current_name,
+                    "원본이름":    current_raw_name,
                     "학과":        current_dept,
                     "전화번호":    current_phone,
                     "면접_통합데이터": "\n".join(current_parts),
@@ -499,11 +501,12 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 # 새 지원자 시작 → 이전 지원자 저장
                 _flush()
                 parsed_name, xdept, xid = _parse_name_cell(name_val)
-                current_name  = parsed_name
-                current_id    = (row_cells[id_ci] if id_ci is not None and id_ci < len(row_cells) else "") or xid
-                current_dept  = (row_cells[dept_ci] if dept_ci is not None and dept_ci < len(row_cells) else "") or xdept
-                current_phone = row_cells[phone_ci] if phone_ci is not None and phone_ci < len(row_cells) else ""
-                current_parts = []
+                current_name     = parsed_name
+                current_raw_name = name_val
+                current_id       = (row_cells[id_ci] if id_ci is not None and id_ci < len(row_cells) else "") or xid
+                current_dept     = (row_cells[dept_ci] if dept_ci is not None and dept_ci < len(row_cells) else "") or xdept
+                current_phone    = row_cells[phone_ci] if phone_ci is not None and phone_ci < len(row_cells) else ""
+                current_parts    = []
 
             if not current_name:
                 # 아직 지원자 탐색 전 → 건너뜀
@@ -538,7 +541,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
             _flush()
 
     if not all_rows:
-        return pd.DataFrame(columns=["학번", "이름", "학과", "전화번호", "면접_통합데이터"])
+        return pd.DataFrame(columns=["학번", "이름", "원본이름", "학과", "전화번호", "면접_통합데이터"])
 
     df_res = pd.DataFrame(all_rows)
     df_res["이름"] = df_res["이름"].astype(str).str.strip()
@@ -549,6 +552,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         df_res
         .groupby(["학번", "이름"], as_index=False)
         .agg({
+            "원본이름":       "first",
             "학과":           "first",
             "전화번호":       "first",
             "면접_통합데이터": lambda x: "\n---\n".join(filter(None, x)),
@@ -571,9 +575,11 @@ def smart_merge(
     ambiguous: list[dict] = []
 
     for c_idx, c_row in df_comments.iterrows():
-        c_이름  = str(c_row["이름"]).strip()
-        c_학번  = str(c_row.get("학번", "")).strip()
-        comment = str(c_row["면접_통합데이터"])
+        c_이름     = str(c_row["이름"]).strip()
+        c_원본이름 = str(c_row.get("원본이름", c_이름)).strip()
+        c_학번     = str(c_row.get("학번", "")).strip()
+        c_학과     = str(c_row.get("학과", "")).strip()
+        comment    = str(c_row["면접_통합데이터"])
 
         name_mask  = df_base["이름"].astype(str).str.strip() == c_이름
         candidates = df_base[name_mask]
@@ -597,6 +603,9 @@ def smart_merge(
         ambiguous.append({
             "comment_idx":  c_idx,
             "name":         c_이름,
+            "원본이름":     c_원본이름,
+            "학과":         c_학과,
+            "학번":         c_학번,
             "comment_text": comment,
             "candidates": [
                 {
@@ -975,37 +984,84 @@ with tab2:
             st.divider()
             st.subheader("동명이인 수동 매칭")
             st.caption(
-                "아래 각 항목에서 면접표의 이름이 자소서의 어떤 지원자와 연결되는지 선택하세요."
+                "같은 이름의 면접 기록이 여러 개입니다. 각 면접 기록을 자소서의 누구와 연결할지 직접 지정하세요."
             )
 
+            # 이름별로 그룹화
+            from collections import defaultdict
+            groups: dict[str, list[dict]] = defaultdict(list)
             for case in ambiguous_cases:
-                options = ["— 매칭 안 함 —"] + [c["label"] for c in case["candidates"]]
-                st.selectbox(
-                    f"면접표 **'{case['name']}'** 의 코멘트를 누구와 연결할까요?",
-                    options=options,
-                    key=f"manual_{case['comment_idx']}",
-                )
+                groups[case["name"]].append(case)
+
+            for name, cases in groups.items():
+                st.markdown(f"### 동명이인: **{name}** ({len(cases)}건)")
+                candidates = cases[0]["candidates"]
+                cand_options = ["— 매칭 안 함 —"] + [c["label"] for c in candidates]
+
+                for case in cases:
+                    # 면접 기록 식별 정보 구성
+                    raw  = case.get("원본이름", name)
+                    dept = case.get("학과", "")
+                    sid  = case.get("학번", "")
+                    info_parts = [f"원본: **{raw}**"]
+                    if dept: info_parts.append(f"학과: {dept}")
+                    if sid:  info_parts.append(f"학번: {sid}")
+                    info_str = " / ".join(info_parts)
+
+                    # 코멘트 미리보기 (앞 150자)
+                    preview = case["comment_text"][:150].replace("\n", " ")
+                    if len(case["comment_text"]) > 150:
+                        preview += "…"
+
+                    with st.container(border=True):
+                        st.markdown(info_str)
+                        st.caption(preview)
+                        st.selectbox(
+                            "→ 자소서의 누구와 연결?",
+                            options=cand_options,
+                            key=f"manual_{case['comment_idx']}",
+                        )
+
+                # 같은 이름 그룹 내 중복 배정 경고
+                chosen_labels = [
+                    st.session_state.get(f"manual_{c['comment_idx']}", "— 매칭 안 함 —")
+                    for c in cases
+                ]
+                non_skip = [l for l in chosen_labels if l != "— 매칭 안 함 —"]
+                if len(non_skip) != len(set(non_skip)):
+                    st.warning("같은 후보에 두 건 이상 연결되어 있습니다. 확인 후 수정하세요.")
+
+                st.divider()
 
             if st.button("수동 매칭 확정", type="primary", key="btn_manual_confirm"):
-                df_m = st.session_state["df_merged"].copy()
-                for case in ambiguous_cases:
-                    chosen_label = st.session_state.get(
-                        f"manual_{case['comment_idx']}", "— 매칭 안 함 —"
-                    )
-                    if chosen_label == "— 매칭 안 함 —":
-                        continue
-                    chosen_idx = next(
-                        c["base_idx"]
-                        for c in case["candidates"]
-                        if c["label"] == chosen_label
-                    )
-                    df_m.at[chosen_idx, "면접_통합데이터"] = case["comment_text"]
+                # 중복 배정 최종 검사
+                all_chosen = [
+                    st.session_state.get(f"manual_{case['comment_idx']}", "— 매칭 안 함 —")
+                    for case in ambiguous_cases
+                ]
+                non_skip_all = [l for l in all_chosen if l != "— 매칭 안 함 —"]
+                if len(non_skip_all) != len(set(non_skip_all)):
+                    st.error("동일한 지원자에게 두 개 이상의 면접 기록이 배정되어 있습니다. 수정 후 다시 확정하세요.")
+                else:
+                    df_m = st.session_state["df_merged"].copy()
+                    for case in ambiguous_cases:
+                        chosen_label = st.session_state.get(
+                            f"manual_{case['comment_idx']}", "— 매칭 안 함 —"
+                        )
+                        if chosen_label == "— 매칭 안 함 —":
+                            continue
+                        chosen_idx = next(
+                            c["base_idx"]
+                            for c in case["candidates"]
+                            if c["label"] == chosen_label
+                        )
+                        df_m.at[chosen_idx, "면접_통합데이터"] = case["comment_text"]
 
-                st.session_state["df_merged"]  = df_m
-                st.session_state["ambiguous"]  = []
-                matched_final = df_m["면접_통합데이터"].notna().sum()
-                st.success(f"수동 매칭 완료 — 최종 {matched_final}/{len(df_m)}명 매칭")
-                st.rerun()
+                    st.session_state["df_merged"]  = df_m
+                    st.session_state["ambiguous"]  = []
+                    matched_final = df_m["면접_통합데이터"].notna().sum()
+                    st.success(f"수동 매칭 완료 — 최종 {matched_final}/{len(df_m)}명 매칭")
+                    st.rerun()
 
         if "df_merged" in st.session_state:
             df_merged = st.session_state["df_merged"]
