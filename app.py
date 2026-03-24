@@ -148,7 +148,7 @@ def assign_seats(
     gender_map     = estimate_genders_batch(unique_names, model)
     work["성별"]   = work["이름"].astype(str).map(gender_map).fillna("미상")
 
-    work["학번_연도"] = work["학번"].astype(str).str[:2]
+    work["학번_연도"] = work["학번"].astype(str).str[2:4]
 
     n          = len(work)
     num_tables = math.ceil(n / num_people)
@@ -187,14 +187,20 @@ def assign_seats(
     e_idxs = ordered_indices(work["EI"] == "E")
     i_idxs = ordered_indices(work["EI"] == "I")
 
-    # ── 테이블 할당 (E/I offset round-robin) ──────────────────
+    # ── 테이블 할당 (E/I 교대 합산 후 단일 round-robin) ──────
+    # E와 I를 교대로 합치면 자연스럽게 각 테이블에 E/I가 섞이고,
+    # 단일 round-robin이므로 어떤 테이블도 ceil(n/num_tables) ≤ num_people 를 절대 초과하지 않음
     tables: list[list[int]] = [[] for _ in range(num_tables)]
-    half = num_tables // 2  # I 그룹 시작 오프셋 — E와 엇갈리게
 
-    for pos, idx in enumerate(e_idxs):
+    merged_idxs: list[int] = []
+    for e, i in zip(e_idxs, i_idxs):
+        merged_idxs.append(e)
+        merged_idxs.append(i)
+    merged_idxs.extend(e_idxs[len(i_idxs):])
+    merged_idxs.extend(i_idxs[len(e_idxs):])
+
+    for pos, idx in enumerate(merged_idxs):
         tables[pos % num_tables].append(idx)
-    for pos, idx in enumerate(i_idxs):
-        tables[(pos + half) % num_tables].append(idx)
 
     work["테이블_번호"] = 0
     for t_num, members in enumerate(tables):
