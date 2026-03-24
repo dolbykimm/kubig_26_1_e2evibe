@@ -982,39 +982,14 @@ with tab2:
     )
 
     if uploaded_interview is not None:
-        # ── ① 다중 시트 읽기 (수식의 결괏값만 강제로 읽어오기) ───────────────────
-        import openpyxl
-        
-        # data_only=True 옵션을 주어 수식을 무시하고 엑셀 화면에 보이는 최종 결괏값만 가져옵니다.
-        wb = openpyxl.load_workbook(uploaded_interview, data_only=True)
+        # ── ① 다중 시트 읽기 (data_only=True 로 수식 결과값을 읽음) ──
+        _raw_bytes = uploaded_interview.read()
+        _wb = openpyxl.load_workbook(io.BytesIO(_raw_bytes), data_only=True)
         sheets: dict[str, pd.DataFrame] = {}
-        
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            # 시트의 데이터를 추출 (수식 텍스트가 아닌 계산된 value만 가져옴)
-            data = list(ws.values)
-            
-            if data and len(data) > 0:
-                raw_cols = data[0]
-                new_cols = []
-                seen = {}
-                
-                # 중복 컬럼명 방지 로직 (에러 해결의 핵심)
-                for c in raw_cols:
-                    c_str = "Unnamed" if c is None else str(c)
-                    if c_str in seen:
-                        seen[c_str] += 1
-                        new_cols.append(f"{c_str}_{seen[c_str]}")
-                    else:
-                        seen[c_str] = 0
-                        new_cols.append(c_str)
-                        
-                # 중복 제거된 컬럼명으로 데이터프레임 생성
-                df_s = pd.DataFrame(data[1:], columns=new_cols)
-            else:
-                df_s = pd.DataFrame()
-            sheets[sheet_name] = df_s
-
+        for _sname in _wb.sheetnames:
+            _ws  = _wb[_sname]
+            _rows = [[cell.value for cell in row] for row in _ws.iter_rows()]
+            sheets[_sname] = pd.DataFrame(_rows) if _rows else pd.DataFrame()
         st.success(
             f"파일 로드 완료 — {len(sheets)}개 시트: **{', '.join(sheets.keys())}**"
         )
