@@ -995,8 +995,22 @@ with tab2:
             data = list(ws.values)
             
             if data and len(data) > 0:
-                # 첫 번째 행을 컬럼(헤더)으로, 나머지를 데이터로 DataFrame 생성
-                df_s = pd.DataFrame(data[1:], columns=data[0])
+                raw_cols = data[0]
+                new_cols = []
+                seen = {}
+                
+                # 중복 컬럼명 방지 로직 (에러 해결의 핵심)
+                for c in raw_cols:
+                    c_str = "Unnamed" if c is None else str(c)
+                    if c_str in seen:
+                        seen[c_str] += 1
+                        new_cols.append(f"{c_str}_{seen[c_str]}")
+                    else:
+                        seen[c_str] = 0
+                        new_cols.append(c_str)
+                        
+                # 중복 제거된 컬럼명으로 데이터프레임 생성
+                df_s = pd.DataFrame(data[1:], columns=new_cols)
             else:
                 df_s = pd.DataFrame()
             sheets[sheet_name] = df_s
