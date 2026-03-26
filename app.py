@@ -114,6 +114,48 @@ def estimate_genders_batch(names_tuple: tuple[str, ...], model: str) -> dict[str
 
 
 # ─────────────────────────────────────────────────────────────
+# 참가자 명단 파일 파싱 (TXT / XLSX)
+# ─────────────────────────────────────────────────────────────
+def parse_roster_file(uploaded_file) -> pd.DataFrame | None:
+    """
+    TXT 또는 XLSX 참가자 명단 파일 → DataFrame 반환.
+    - TXT : 줄마다 이름 하나 (공백 제거)
+    - XLSX: resolve_columns 로 이름/학번/학과 자동 감지 후 전체 반환
+    """
+    fname = uploaded_file.name.lower()
+    if fname.endswith(".txt"):
+        text  = uploaded_file.read().decode("utf-8", errors="ignore")
+        names = [l.strip() for l in text.splitlines() if l.strip()]
+        return pd.DataFrame({"이름": names}) if names else None
+
+    # XLSX / XLS
+    df = pd.read_excel(uploaded_file)
+    if df.empty:
+        return None
+
+    # 열 이름이 정수(openpyxl raw)면 첫 행을 헤더로 올림
+    if all(isinstance(c, int) for c in df.columns):
+        df.columns = df.iloc[0].astype(str)
+        df = df.iloc[1:].reset_index(drop=True)
+
+    # 이름 컬럼 감지: resolve_columns 우선, 없으면 _is_korean_name 점수 기반
+    col_map  = resolve_columns(list(df.columns))
+    name_col = col_map.get("이름")
+    if name_col is None:
+        best_col, best_cnt = None, 0
+        for col in df.columns:
+            cnt = df[col].dropna().astype(str).apply(_is_korean_name).sum()
+            if cnt > best_cnt:
+                best_cnt, best_col = cnt, col
+        name_col = best_col
+
+    if name_col is not None and name_col != "이름":
+        df = df.rename(columns={name_col: "이름"})
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────
 # 자리배치 알고리즘
 # ─────────────────────────────────────────────────────────────
 def assign_seats(
@@ -121,6 +163,7 @@ def assign_seats(
     num_people: int,
     personality_mode: str,
     student_id_policy: str,
+    late_names: list[str] | None = None,
     model: str = "llama-3.3-70b-versatile",
 ) -> pd.DataFrame:
     """
@@ -207,6 +250,47 @@ def assign_seats(
     for t_num, members in enumerate(tables):
         for idx in members:
             work.at[idx, "테이블_번호"] = t_num + 1
+
+    # ── 늦참자 배치 ──────────────────────────────────────────────
+    if late_names:
+        # 늦참자 성별 LLM 추정 (기존 배치와 별도 호출)
+        late_gender_map = estimate_genders_batch(tuple(late_names), model)
+
+        # 현재 테이블별 인원 수 계산
+        table_sizes: dict[int, int] = {
+            t_num + 1: len(members) for t_num, members in enumerate(tables)
+        }
+
+        late_rows = []
+        for lname in late_names:
+            # 가장 인원이 적은 테이블 선택
+            target_t = min(table_sizes, key=table_sizes.__getitem__)
+            table_sizes[target_t] += 1
+
+            # 해당 테이블의 현재 E/I 비율로 늦참자 EI 결정
+            cur_members = work[work["테이블_번호"] == target_t]
+            e_cnt = (cur_members["EI"] == "E").sum()
+            i_cnt = (cur_members["EI"] == "I").sum()
+            late_ei = "E" if e_cnt <= i_cnt else "I"
+
+            late_rows.append({
+                "이름":        lname,
+                "학과":        "미상",
+                "학번":        "",
+                "성격 판정":   "외향형" if late_ei == "E" else "내향형",
+                "근거 요약":   "늦참자",
+                "성격_키워드": "",
+                "성별":        late_gender_map.get(lname, "미상"),
+                "EI":          late_ei,
+                "학번_연도":   "미상",
+                "테이블_번호": target_t,
+                "늦참자":      True,
+            })
+
+            # work 에 바로 추가해야 다음 늦참자가 최신 인원 수 기준으로 배치됨
+            work = pd.concat(
+                [work, pd.DataFrame([late_rows[-1]])], ignore_index=True
+            )
 
     return work.sort_values("테이블_번호").reset_index(drop=True)
 
@@ -865,19 +949,19 @@ tab1, tab2, tab3 = st.tabs(["1단계: 자소서 분석", "2단계: 면접표 병
 with tab1:
     st.header("1단계: 자소서 분석")
     uploaded_resume = st.file_uploader(
-        "자소서 엑셀 파일을 업로드하세요",
+        "자기소개서가 들어있는 엑셀 파일을 올려주세요!",
         type=["xlsx", "xls"],
         key="resume",
     )
 
     if uploaded_resume is not None:
         df_resume = pd.read_excel(uploaded_resume)
-        st.success(f"파일 로드 완료 — {len(df_resume)}행 × {len(df_resume.columns)}열")
+        st.success(f"총 {len(df_resume)}명의 데이터를 불러왔어요!")
         st.dataframe(df_resume, use_container_width=True)
 
         st.divider()
-        st.subheader("열 매핑 확인")
-        st.caption("자동으로 감지한 열입니다. 틀린 경우 드롭다운에서 직접 선택하세요.")
+        st.subheader("어떤 칸이 뭔지 확인해 주세요")
+        st.caption("자동으로 찾아봤는데, 틀린 게 있으면 직접 바꿔주세요.")
 
         auto_map = resolve_columns(list(df_resume.columns))
         col_options = [None] + list(df_resume.columns)  # None = 미선택
@@ -907,7 +991,7 @@ with tab1:
         info_cols = {c for c in confirmed_map.values() if c is not None}
         remaining_cols = [c for c in df_resume.columns if c not in info_cols]
 
-        st.markdown("**자소서 항목 열 선택** (복수 선택 가능 — 선택한 열을 순서대로 이어붙여 LLM에 전달합니다)")
+        st.markdown("**자기소개서 내용이 있는 칸을 골라주세요** (여러 개 선택 가능 — 선택한 순서대로 AI에 전달돼요)")
         essay_cols: list[str] = st.multiselect(
             label="자소서 항목 열",
             options=list(df_resume.columns),
@@ -918,14 +1002,14 @@ with tab1:
 
         unresolved = [lbl for role, lbl in role_labels.items() if confirmed_map[role] is None]
         if unresolved:
-            st.warning(f"아직 매핑되지 않은 열: **{', '.join(unresolved)}** — 드롭다운에서 선택해 주세요.")
+            st.warning(f"아직 연결 안 된 항목이 있어요: **{', '.join(unresolved)}** — 드롭다운에서 골라주세요!")
         elif not essay_cols:
-            st.warning("자소서 항목 열을 하나 이상 선택해 주세요.")
+            st.warning("자기소개서 내용이 있는 칸을 하나 이상 골라야 해요!")
         else:
             st.divider()
-            st.subheader("성격 분석 (Groq · llama3-8b-8192)")
+            st.subheader("AI로 성격 분석하기")
 
-            if st.button("분석 시작", type="primary", key="btn_analyze"):
+            if st.button("분석 시작!", type="primary", key="btn_analyze"):
                 results = []
                 progress = st.progress(0, text="분석 중...")
                 total = len(df_resume)
@@ -969,14 +1053,14 @@ with tab1:
             elif "df_personality" in st.session_state:
                 st.dataframe(st.session_state["df_personality"], use_container_width=True)
     else:
-        st.info("엑셀 파일(.xlsx / .xls)을 업로드하면 데이터가 표시됩니다.")
+        st.info("자기소개서 엑셀 파일을 올리면 내용이 여기에 나타나요.")
 
 # ── 2단계: 면접표 병합 ────────────────────────────────────────
 with tab2:
     st.header("2단계: 면접표 병합")
 
     uploaded_interview = st.file_uploader(
-        "면접표 엑셀 파일을 업로드하세요",
+        "면접 점수표 엑셀 파일을 올려주세요!",
         type=["xlsx", "xls"],
         key="interview",
     )
@@ -991,7 +1075,7 @@ with tab2:
             _rows = [[cell.value for cell in row] for row in _ws.iter_rows()]
             sheets[_sname] = pd.DataFrame(_rows) if _rows else pd.DataFrame()
         st.success(
-            f"파일 로드 완료 — {len(sheets)}개 시트: **{', '.join(sheets.keys())}**"
+            f"파일을 불러왔어요! 시트 {len(sheets)}개: **{', '.join(sheets.keys())}**"
         )
         for sheet_name, df_s in sheets.items():
             with st.expander(f"시트 미리보기: {sheet_name}  ({len(df_s)}행 × {len(df_s.columns)}열)"):
@@ -1000,8 +1084,8 @@ with tab2:
         st.divider()
 
         # ── ② LLM 시트 구조 추론 ─────────────────────────────
-        st.subheader("시트 구조 자동 추론")
-        if st.button("LLM으로 시트 구조 분석", key="btn_infer"):
+        st.subheader("엑셀 구조 파악하기")
+        if st.button("AI로 구조 분석", key="btn_infer"):
             with st.spinner("LLM이 시트 구조를 분석 중..."):
                 sheet_summary = build_sheets_summary(sheets)
                 inference     = infer_sheet_structure(sheet_summary, selected_model)
@@ -1013,13 +1097,13 @@ with tab2:
         st.divider()
 
         # ── ③ 면접 데이터 추출 + 다중 조건 병합 ──────────────
-        st.subheader("면접 데이터 추출 및 1단계 병합")
+        st.subheader("면접 데이터 가져오기")
 
         has_personality = "df_personality" in st.session_state
         if not has_personality:
-            st.warning("1단계 자소서 분석을 먼저 완료해야 병합할 수 있습니다.")
+            st.warning("먼저 1단계에서 자기소개서 분석을 완료해 주세요!")
 
-        if st.button("병합 실행", type="primary", disabled=not has_personality, key="btn_merge"):
+        if st.button("합치기", type="primary", disabled=not has_personality, key="btn_merge"):
             with st.spinner("면접 코멘트 추출 중..."):
                 df_comments = extract_all_comments(sheets)
 
@@ -1033,19 +1117,19 @@ with tab2:
 
             if ambiguous:
                 st.warning(
-                    f"자동 매칭 완료 — {matched}/{len(df_merged)}명 | "
-                    f"동명이인 **{len(ambiguous)}건** 수동 매칭 필요 ↓"
+                    f"자동 연결 완료 — {matched}/{len(df_merged)}명 | "
+                    f"같은 이름이 **{len(ambiguous)}건** 있어요. 아래에서 직접 연결해 주세요! ↓"
                 )
             else:
-                st.success(f"병합 완료 — {matched} / {len(df_merged)}명 면접 코멘트 매칭")
+                st.success(f"완료! {matched} / {len(df_merged)}명 면접 코멘트 연결됐어요.")
 
         # ── 동명이인 수동 매칭 구역 ──────────────────────────
         if st.session_state.get("ambiguous"):
             ambiguous_cases = st.session_state["ambiguous"]
             st.divider()
-            st.subheader("동명이인 수동 매칭")
+            st.subheader("같은 이름 직접 연결하기")
             st.caption(
-                "같은 이름의 면접 기록이 여러 개입니다. 각 면접 기록을 자소서의 누구와 연결할지 직접 지정하세요."
+                "같은 이름이 여러 명이에요! 각 면접 기록이 누구 건지 직접 골라주세요."
             )
 
             # 이름별로 그룹화
@@ -1077,10 +1161,10 @@ with tab2:
                     with st.container(border=True):
                         st.markdown(info_str)
                         if not sid:
-                            st.warning("학번 없음 — 원본이름·코멘트 내용으로 직접 구분하세요.")
+                            st.warning("학번 정보가 없어요 — 이름이나 코멘트 내용으로 구분해 주세요.")
                         st.caption(preview)
                         st.selectbox(
-                            "→ 자소서의 누구와 연결?",
+                            "→ 누구의 면접 기록인가요?",
                             options=cand_options,
                             key=f"manual_{case['comment_idx']}",
                         )
@@ -1092,7 +1176,7 @@ with tab2:
                 ]
                 non_skip = [l for l in chosen_labels if l != "— 매칭 안 함 —"]
                 if len(non_skip) != len(set(non_skip)):
-                    st.warning("같은 후보에 두 건 이상 연결되어 있습니다. 확인 후 수정하세요.")
+                    st.warning("같은 사람한테 두 개 이상 연결됐어요! 확인해 주세요.")
 
                 st.divider()
 
@@ -1104,7 +1188,7 @@ with tab2:
                 ]
                 non_skip_all = [l for l in all_chosen if l != "— 매칭 안 함 —"]
                 if len(non_skip_all) != len(set(non_skip_all)):
-                    st.error("동일한 지원자에게 두 개 이상의 면접 기록이 배정되어 있습니다. 수정 후 다시 확정하세요.")
+                    st.error("같은 사람에게 면접 기록이 두 개 이상 연결됐어요! 수정 후 다시 확정해 주세요.")
                 else:
                     df_m = st.session_state["df_merged"].copy()
                     for case in ambiguous_cases:
@@ -1123,7 +1207,7 @@ with tab2:
                     st.session_state["df_merged"]  = df_m
                     st.session_state["ambiguous"]  = []
                     matched_final = df_m["면접_통합데이터"].notna().sum()
-                    st.success(f"수동 매칭 완료 — 최종 {matched_final}/{len(df_m)}명 매칭")
+                    st.success(f"연결 완료! 최종 {matched_final}/{len(df_m)}명 연결됐어요.")
                     st.rerun()
 
         if "df_merged" in st.session_state:
@@ -1133,15 +1217,15 @@ with tab2:
             st.divider()
 
             # ── ④ 면접 코멘트 기반 최종 재분석 ─────────────
-            st.subheader("면접 코멘트 종합 재분석 (선택)")
-            st.caption("자소서 판정 + 면접 코멘트를 함께 LLM에 넘겨 최종 성격을 다시 판정합니다.")
+            st.subheader("AI로 다시 분석하기 (선택)")
+            st.caption("자기소개서 분석 결과와 면접 코멘트를 합쳐서 AI가 다시 성격을 판단해요.")
 
             has_comments = df_merged["면접_통합데이터"].notna().any()
             if not has_comments:
-                st.info("매칭된 면접 코멘트가 없어 재분석을 건너뜁니다.")
+                st.info("연결된 면접 코멘트가 없어서 재분석을 건너뛸게요.")
 
             if st.button(
-                "최종 재분석 실행", type="primary",
+                "다시 분석하기!", type="primary",
                 disabled=not has_comments, key="btn_reanalyze"
             ):
                 df_final = df_merged.copy()
@@ -1184,7 +1268,7 @@ with tab2:
                     columns=["최종_성격_판정", "최종_근거", "면접_통합데이터"], errors="ignore"
                 )
                 st.session_state["df_merged"] = df_final
-                st.success("재분석 완료! 3단계 자리배치에 최종 판정이 자동 반영됩니다.")
+                st.success("다시 분석 완료! 3단계 자리배치에 자동으로 반영돼요.")
                 st.dataframe(df_final, use_container_width=True)
 
             st.divider()
@@ -1198,7 +1282,7 @@ with tab2:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
     else:
-        st.info("엑셀 파일(.xlsx / .xls)을 업로드하면 데이터가 표시됩니다.")
+        st.info("면접 점수표 엑셀 파일을 올리면 내용이 여기에 나타나요.")
 
 # ── 3단계: 자리배치 ───────────────────────────────────────────
 with tab3:
@@ -1210,32 +1294,49 @@ with tab3:
     with col_left:
         st.subheader("설정")
 
-        uploaded_txt = st.file_uploader(
-            "자리배치 기준 TXT 파일 업로드 (선택)",
-            type=["txt"],
-            key="seating_txt",
+        uploaded_roster = st.file_uploader(
+            "참가자 명단 파일 (txt 또는 엑셀)",
+            type=["txt", "xlsx", "xls"],
+            key="seating_roster",
+            help="이름 목록이 들어있는 txt 파일이나 엑셀 파일을 올려주세요.",
         )
-        if uploaded_txt is not None:
-            txt_content = uploaded_txt.read().decode("utf-8")
-            st.text_area("파일 내용 미리보기", txt_content, height=120)
+        if uploaded_roster is not None:
+            df_roster = parse_roster_file(uploaded_roster)
+            if df_roster is not None and not df_roster.empty:
+                st.success(f"참가자 {len(df_roster)}명 인식 완료!")
+                st.dataframe(df_roster, use_container_width=True)
+                st.session_state["df_roster"] = df_roster
+            else:
+                st.warning("명단을 인식하지 못했어요. 파일 형식을 확인해 주세요.")
+
+        st.divider()
+        st.subheader("늦참자 추가")
+        st.caption("나중에 온 사람 이름을 한 줄에 하나씩 적어주세요.")
+        late_input = st.text_area(
+            "늦참자 이름",
+            placeholder="홍길동\n김철수\n이영희",
+            key="late_arrivals_input",
+            label_visibility="collapsed",
+            height=100,
+        )
 
         st.divider()
 
-        num_people = st.slider("테이블당 인원수", min_value=2, max_value=8, value=4, step=1)
+        num_people = st.slider("테이블당 최대 인원수", min_value=2, max_value=8, value=4, step=1)
 
         st.divider()
 
         personality = st.radio(
-            "성격 유형 기준",
+            "성격 기준",
             options=["혼합 배치 (외향·내향 섞기)", "유사 배치 (비슷한 성격끼리)", "무작위"],
             index=0,
-            help="E/I 혼합은 모든 모드에서 항상 적용됩니다.",
+            help="외향(E)·내향(I) 혼합은 모든 모드에서 항상 적용돼요.",
         )
 
         st.divider()
 
         student_id_policy = st.radio(
-            "학번 기준",
+            "같은 학번 처리 방식",
             options=["학번 무관", "동일 학번 분리", "동일 학번 우선 배치"],
             index=0,
         )
@@ -1246,18 +1347,29 @@ with tab3:
 
         has_data = "df_personality" in st.session_state
         if not has_data:
-            st.info("1단계에서 자소서 분석을 먼저 완료해 주세요.")
+            st.info("먼저 1단계에서 자기소개서 분석을 완료해 주세요!")
 
-        if st.button("자리배치 생성", type="primary", disabled=not has_data):
+        if st.button("자리 배치하기!", type="primary", disabled=not has_data):
             df_src = st.session_state["df_personality"].copy()
+            late_names = [
+                n.strip()
+                for n in st.session_state.get("late_arrivals_input", "").splitlines()
+                if n.strip()
+            ]
 
             with st.spinner("배치 중..."):
-                df_seated = assign_seats(df_src, num_people, personality, student_id_policy, model=selected_model)
+                df_seated = assign_seats(
+                    df_src, num_people, personality, student_id_policy,
+                    late_names=late_names or None,
+                    model=selected_model,
+                )
 
             st.session_state["df_seated"] = df_seated
+            late_cnt = int(df_seated.get("늦참자", pd.Series(dtype=bool)).sum()) if "늦참자" in df_seated.columns else 0
+            late_msg = f" (늦참자 {late_cnt}명 포함)" if late_cnt else ""
             st.success(
-                f"배치 완료 — 총 {len(df_seated)}명 / "
-                f"{df_seated['테이블_번호'].max()}개 테이블"
+                f"배치 완료! 총 {len(df_seated)}명을 "
+                f"{df_seated['테이블_번호'].max()}개 테이블에 나눴어요.{late_msg}"
             )
 
         if "df_seated" in st.session_state:
@@ -1289,12 +1401,16 @@ with tab3:
                             tooltip = str(r.get("성격_키워드", "")).strip()
                             if not tooltip or tooltip in ("nan", "None"):
                                 tooltip = ""
+                            is_late = bool(r.get("늦참자", False))
+                            late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>' if is_late else ""
                             name_html = (
                                 f'<span title="{tooltip}" style="cursor:help;'
                                 f'border-bottom:1px dotted #888">{r["이름"]}</span>'
                             )
+                            dept_str = r["학과"] if str(r["학과"]) not in ("미상", "nan", "") else "?"
+                            year_str = r["학번_연도"] if str(r["학번_연도"]) not in ("미상", "nan", "") else "?"
                             st.markdown(
-                                f"- {gender_icon} {name_html} ({r['학과']} / {r['학번_연도']}학번) {ei_tag}",
+                                f"- {gender_icon} {name_html} ({dept_str} / {year_str}학번) {ei_tag}{late_badge}",
                                 unsafe_allow_html=True,
                             )
 
