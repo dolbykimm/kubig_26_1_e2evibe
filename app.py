@@ -858,8 +858,8 @@ def resolve_columns(columns: list[str]) -> dict[str, str | None]:
 # ─────────────────────────────────────────────────────────────
 # Streamlit UI
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="오티 자리배치 앱", layout="wide")
-st.title("오티 자리배치 앱")
+st.set_page_config(page_title="OT 자리배치", layout="wide", page_icon="🪑")
+st.title("🪑 OT 자리배치 앱")
 
 # ── 사이드바 ─────────────────────────────────────────────────
 with st.sidebar:
@@ -874,6 +874,17 @@ with st.sidebar:
         help="Groq에서 현재 활성화된 llama 계열 모델 목록입니다. (5분마다 자동 갱신)",
     )
     st.caption(f"선택된 모델: `{selected_model}`")
+
+    st.divider()
+    st.subheader("📋 진행 현황")
+    step1_done = "df_personality" in st.session_state
+    step2_done = "df_merged"      in st.session_state
+    step3_done = "df_seated"      in st.session_state
+    st.markdown(
+        f"{'✅' if step1_done else '⬜'} STEP 1 · 자소서 분석\n\n"
+        f"{'✅' if step2_done else '⬜'} STEP 2 · 면접표 병합\n\n"
+        f"{'✅' if step3_done else '⬜'} STEP 3 · 자리배치"
+    )
 
     # ── Google Sheets 공유 ───────────────────────────────────
     st.divider()
@@ -915,13 +926,46 @@ with st.sidebar:
                 except Exception as e:
                     st.error(str(e))
 
-tab1, tab2, tab3 = st.tabs(["1단계: 자소서 분석", "2단계: 면접표 병합", "3단계: 자리배치"])
+
+# ── 앱 소개 ──────────────────────────────────────────────────
+with st.expander("💡 처음 오셨나요? 사용 방법을 확인하세요!", expanded=False):
+    st.markdown("""
+#### 이 앱은 뭐 하는 건가요?
+자기소개서와 면접 결과를 바탕으로 **OT 자리를 자동으로 배치**해 드려요.
+외향·내향, 학번, 성별이 골고루 섞이도록 AI가 계산해요.
+
+---
+
+#### 사용 순서
+
+| 단계 | 하는 일 | 필요한 파일 |
+|------|---------|------------|
+| **📝 STEP 1** | 자기소개서 업로드 → AI가 외향/내향 성격 분석 | 자소서 엑셀 |
+| **📊 STEP 2** | 면접 점수표 업로드 → 코멘트 반영해 성격 재분석 | 면접표 엑셀 *(선택)* |
+| **🪑 STEP 3** | 배치 설정 후 버튼 클릭 → 자리 배치 완성! | — |
+
+> 💡 면접표(STEP 2)가 없어도 STEP 1 → STEP 3 만으로 배치 가능해요!
+
+---
+
+#### 자주 묻는 것들
+- **임원진·기존부원은요?** → STEP 3에서 이름 직접 입력하면 돼요. 자동으로 외향으로 분류돼요.
+- **늦참자가 있어요** → STEP 3에서 이름 입력하면 나머지 인원과 골고루 섞어 배치해요.
+- **Groq API 키는 왼쪽 사이드바** ⬅ 에 입력하세요. (AI 기능 사용 시 필요)
+""")
+
+tab1, tab2, tab3 = st.tabs([
+    "📝  STEP 1 · 자소서 분석",
+    "📊  STEP 2 · 면접표 병합",
+    "🪑  STEP 3 · 자리배치",
+])
 
 # ── 1단계: 자소서 분석 ────────────────────────────────────────
 with tab1:
-    st.header("1단계: 자소서 분석")
+    st.header("📝 STEP 1 · 자소서 분석")
+    st.caption("지원자들의 자기소개서를 AI가 읽고 외향형/내향형을 판단해요.")
     uploaded_resume = st.file_uploader(
-        "자기소개서가 들어있는 엑셀 파일을 올려주세요!",
+        "자기소개서 엑셀 파일을 올려주세요",
         type=["xlsx", "xls"],
         key="resume",
     )
@@ -1029,10 +1073,11 @@ with tab1:
 
 # ── 2단계: 면접표 병합 ────────────────────────────────────────
 with tab2:
-    st.header("2단계: 면접표 병합")
+    st.header("📊 STEP 2 · 면접표 병합")
+    st.caption("면접 코멘트·점수를 반영해 성격 판단을 더 정확하게 다듬어요. 면접표가 없으면 이 단계는 건너뛰어도 돼요.")
 
     uploaded_interview = st.file_uploader(
-        "면접 점수표 엑셀 파일을 올려주세요!",
+        "면접 점수표 엑셀 파일을 올려주세요",
         type=["xlsx", "xls"],
         key="interview",
     )
@@ -1258,13 +1303,14 @@ with tab2:
 
 # ── 3단계: 자리배치 ───────────────────────────────────────────
 with tab3:
-    st.header("3단계: 자리배치")
+    st.header("🪑 STEP 3 · 자리배치")
+    st.caption("설정을 맞추고 버튼을 누르면 자리가 자동으로 배치돼요!")
 
     col_left, col_right = st.columns([1, 2])
 
     # ── 설정 패널 ────────────────────────────────────────────
     with col_left:
-        st.subheader("설정")
+        st.subheader("⚙️ 배치 설정")
 
         uploaded_roster = st.file_uploader(
             "참가자 명단 파일 (txt 또는 엑셀)",
@@ -1282,14 +1328,25 @@ with tab3:
                 st.warning("명단을 인식하지 못했어요. 파일 형식을 확인해 주세요.")
 
         st.divider()
-        st.subheader("늦참자 추가")
-        st.caption("나중에 온 사람 이름을 한 줄에 하나씩 적어주세요.")
+        st.subheader("⏰ 늦참자")
+        st.caption("나중에 온 사람 이름을 한 줄에 하나씩 적어주세요. 나머지 참가자와 골고루 섞어 배치돼요.")
         late_input = st.text_area(
             "늦참자 이름",
             placeholder="홍길동\n김철수\n이영희",
             key="late_arrivals_input",
             label_visibility="collapsed",
-            height=100,
+            height=90,
+        )
+
+        st.divider()
+        st.subheader("👑 임원진 / 기존 부원")
+        st.caption("자소서를 제출하지 않은 임원진·기존 부원 이름을 적어주세요. 모두 외향형으로 배치돼요.")
+        officer_input = st.text_area(
+            "임원진/기존부원 이름",
+            placeholder="회장 홍길동\n부회장 김철수\n이영희",
+            key="officer_input",
+            label_visibility="collapsed",
+            height=90,
         )
 
         st.divider()
@@ -1321,52 +1378,76 @@ with tab3:
         if not has_data:
             st.info("먼저 1단계에서 자기소개서 분석을 완료해 주세요!")
 
-        if st.button("자리 배치하기!", type="primary", disabled=not has_data):
+        if st.button("🪑 자리 배치하기!", type="primary", disabled=not has_data):
             df_src = st.session_state["df_personality"].copy()
 
-            # 늦참자 행 미리 추가 (알고리즘이 처음부터 포함해 최대 인원 초과 없음)
+            # ── 늦참자: E/I 전체 비율 보고 교대 배정 ─────────────
             late_names = [
                 n.strip()
                 for n in st.session_state.get("late_arrivals_input", "").splitlines()
                 if n.strip()
             ]
-            if late_names:
-                # E/I 는 전체 비율 보고 교대 배정 (늦참 여부와 무관하게 균형 유지)
-                e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum()
-                i_cnt = len(df_src) - e_cnt
-                late_rows_data = []
-                for name in late_names:
-                    ei_val = "외향형" if e_cnt <= i_cnt else "내향형"
-                    if ei_val == "외향형":
-                        e_cnt += 1
-                    else:
-                        i_cnt += 1
-                    late_rows_data.append({
-                        "이름":        name,
-                        "학과":        "미상",
-                        "학번":        "",
-                        "성격 판정":   ei_val,
-                        "근거 요약":   "늦참자",
-                        "성격_키워드": "",
-                        "늦참자":      True,
-                    })
+            # ── 임원진/기존부원: 전원 외향형 ──────────────────────
+            officer_names = [
+                n.strip()
+                for n in st.session_state.get("officer_input", "").splitlines()
+                if n.strip()
+            ]
+
+            extra_rows: list[dict] = []
+
+            # 임원진 먼저 추가 (외향형 고정)
+            for name in officer_names:
+                extra_rows.append({
+                    "이름":        name,
+                    "학과":        "미상",
+                    "학번":        "",
+                    "성격 판정":   "외향형",
+                    "근거 요약":   "임원/기존부원",
+                    "성격_키워드": "",
+                    "임원":        True,
+                })
+
+            # 늦참자: 현재 E/I 비율 기준으로 교대 배정
+            e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum() + len(officer_names)
+            i_cnt = len(df_src) - (df_src["성격 판정"].str.contains("외향", na=False).sum())
+            for name in late_names:
+                ei_val = "외향형" if e_cnt <= i_cnt else "내향형"
+                if ei_val == "외향형":
+                    e_cnt += 1
+                else:
+                    i_cnt += 1
+                extra_rows.append({
+                    "이름":        name,
+                    "학과":        "미상",
+                    "학번":        "",
+                    "성격 판정":   ei_val,
+                    "근거 요약":   "늦참자",
+                    "성격_키워드": "",
+                    "늦참자":      True,
+                })
+
+            if extra_rows:
                 df_src = pd.concat(
-                    [df_src, pd.DataFrame(late_rows_data)], ignore_index=True
+                    [df_src, pd.DataFrame(extra_rows)], ignore_index=True
                 )
 
-            with st.spinner("배치 중..."):
+            with st.spinner("자리 배치 중..."):
                 df_seated = assign_seats(
                     df_src, num_people, personality, student_id_policy,
                     model=selected_model,
                 )
 
             st.session_state["df_seated"] = df_seated
-            late_cnt = int(df_seated.get("늦참자", pd.Series(dtype=bool)).sum()) if "늦참자" in df_seated.columns else 0
-            late_msg = f" (늦참자 {late_cnt}명 포함)" if late_cnt else ""
-            st.success(
-                f"배치 완료! 총 {len(df_seated)}명을 "
-                f"{df_seated['테이블_번호'].max()}개 테이블에 나눴어요.{late_msg}"
-            )
+            total = len(df_seated)
+            n_tables = df_seated["테이블_번호"].max()
+            late_cnt = int(df_seated["늦참자"].fillna(False).sum()) if "늦참자" in df_seated.columns else 0
+            off_cnt  = int(df_seated["임원"].fillna(False).sum())   if "임원"   in df_seated.columns else 0
+            extra_msg = []
+            if off_cnt:  extra_msg.append(f"임원/기존부원 {off_cnt}명")
+            if late_cnt: extra_msg.append(f"늦참자 {late_cnt}명")
+            extra_str = f" ({', '.join(extra_msg)} 포함)" if extra_msg else ""
+            st.success(f"배치 완료! 총 {total}명을 {n_tables}개 테이블에 나눴어요.{extra_str}")
 
         if "df_seated" in st.session_state:
             df_seated = st.session_state["df_seated"]
@@ -1397,8 +1478,10 @@ with tab3:
                             tooltip = str(r.get("성격_키워드", "")).strip()
                             if not tooltip or tooltip in ("nan", "None"):
                                 tooltip = ""
-                            is_late = bool(r.get("늦참자", False))
-                            late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>' if is_late else ""
+                            is_late    = bool(r.get("늦참자", False))
+                            is_officer = bool(r.get("임원", False))
+                            late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>'   if is_late    else ""
+                            off_badge  = ' <span style="color:#8e44ad;font-size:0.75em">👑임원</span>' if is_officer else ""
                             name_html = (
                                 f'<span title="{tooltip}" style="cursor:help;'
                                 f'border-bottom:1px dotted #888">{r["이름"]}</span>'
@@ -1406,7 +1489,7 @@ with tab3:
                             dept_str = r["학과"] if str(r["학과"]) not in ("미상", "nan", "") else "?"
                             year_str = r["학번_연도"] if str(r["학번_연도"]) not in ("미상", "nan", "") else "?"
                             st.markdown(
-                                f"- {gender_icon} {name_html} ({dept_str} / {year_str}학번) {ei_tag}{late_badge}",
+                                f"- {gender_icon} {name_html} ({dept_str} / {year_str}학번) {ei_tag}{late_badge}{off_badge}",
                                 unsafe_allow_html=True,
                             )
 
