@@ -232,34 +232,65 @@ def assign_seats(
     e_idxs = ordered_indices(work["EI"] == "E")
     i_idxs = ordered_indices(work["EI"] == "I")
 
-    # ── 테이블 할당 (E/I 교대 합산 후 단일 round-robin) ──────
-    # E와 I를 교대로 합치면 자연스럽게 각 테이블에 E/I가 섞이고,
-    # 단일 round-robin이므로 어떤 테이블도 ceil(n/num_tables) ≤ num_people 를 절대 초과하지 않음
-    tables: list[list[int]] = [[] for _ in range(num_tables)]
-
-    merged_idxs: list[int] = []
-    for e, i in zip(e_idxs, i_idxs):
-        merged_idxs.append(e)
-        merged_idxs.append(i)
-    merged_idxs.extend(e_idxs[len(i_idxs):])
-    merged_idxs.extend(i_idxs[len(e_idxs):])
-
-    # 늦참자를 큐 끝에 몰리지 않게 균등 삽입
+    # 늦참자 분리 (혼합 배치용)
     late_flag = work.get("늦참자", pd.Series(False, index=work.index)).fillna(False).astype(bool)
     late_set  = set(work[late_flag].index.tolist())
-    if late_set:
-        regular = [idx for idx in merged_idxs if idx not in late_set]
-        lates   = [idx for idx in merged_idxs if idx in late_set]
-        n_r, n_l = len(regular), len(lates)
-        # step: 정규 인원 사이에 등간격으로 삽입
-        step = (n_r + 1) / (n_l + 1)
-        for i, li in enumerate(lates):
-            pos = int(step * (i + 1)) + i
-            regular.insert(min(pos, len(regular)), li)
-        merged_idxs = regular
 
-    for pos, idx in enumerate(merged_idxs):
-        tables[pos % num_tables].append(idx)
+    tables: list[list[int]] = [[] for _ in range(num_tables)]
+
+    if personality_mode == "혼합 배치 (외향·내향 섞기)":
+        # ── 혼합 배치: E/I 를 각각 테이블 수 만큼 균등 분배 ──
+        # 늦참자를 제외한 E, I 를 각각 테이블에 균등 할당하면
+        # 모든 테이블의 E:I 비율이 전체 비율과 거의 동일해진다.
+        e_regular = [idx for idx in e_idxs if idx not in late_set]
+        i_regular = [idx for idx in i_idxs if idx not in late_set]
+        late_list  = [idx for idx in (e_idxs + i_idxs) if idx in late_set]
+
+        n_e = len(e_regular)
+        n_i = len(i_regular)
+
+        # E를 테이블별 균등 분배
+        e_cursor = 0
+        for t in range(num_tables):
+            cnt = (n_e * (t + 1) // num_tables) - (n_e * t // num_tables)
+            tables[t].extend(e_regular[e_cursor: e_cursor + cnt])
+            e_cursor += cnt
+
+        # I를 테이블별 균등 분배
+        i_cursor = 0
+        for t in range(num_tables):
+            cnt = (n_i * (t + 1) // num_tables) - (n_i * t // num_tables)
+            tables[t].extend(i_regular[i_cursor: i_cursor + cnt])
+            i_cursor += cnt
+
+        # 늦참자를 테이블에 하나씩 순서대로 분배
+        for pos, idx in enumerate(late_list):
+            tables[pos % num_tables].append(idx)
+
+    else:
+        # ── 기존 알고리즘 (유사 배치 / 무작위) ──────────────
+        # E와 I를 교대로 합치면 자연스럽게 각 테이블에 E/I가 섞이고,
+        # 단일 round-robin이므로 어떤 테이블도 ceil(n/num_tables) ≤ num_people 를 절대 초과하지 않음
+        merged_idxs: list[int] = []
+        for e, i in zip(e_idxs, i_idxs):
+            merged_idxs.append(e)
+            merged_idxs.append(i)
+        merged_idxs.extend(e_idxs[len(i_idxs):])
+        merged_idxs.extend(i_idxs[len(e_idxs):])
+
+        # 늦참자를 큐 끝에 몰리지 않게 균등 삽입
+        if late_set:
+            regular = [idx for idx in merged_idxs if idx not in late_set]
+            lates   = [idx for idx in merged_idxs if idx in late_set]
+            n_r, n_l = len(regular), len(lates)
+            step = (n_r + 1) / (n_l + 1)
+            for i, li in enumerate(lates):
+                pos = int(step * (i + 1)) + i
+                regular.insert(min(pos, len(regular)), li)
+            merged_idxs = regular
+
+        for pos, idx in enumerate(merged_idxs):
+            tables[pos % num_tables].append(idx)
 
     work["테이블_번호"] = 0
     for t_num, members in enumerate(tables):
@@ -287,30 +318,61 @@ def extract_interview_score(text: str) -> str:
 # ─────────────────────────────────────────────────────────────
 # 엑셀 직렬화
 # ─────────────────────────────────────────────────────────────
+def _format_name_for_excel(row: pd.Series, duplicate_names: set) -> str:
+    """
+    엑셀 다운로드용 이름 포맷:
+    - 임원  → 이름(임원)
+    - 늦참자 → 이름(늦참)
+    - 동명이인 → 이름(학과)
+    - 그 외 → 이름
+    """
+    name = str(row["이름"])
+    if row.get("임원") is True:
+        return f"{name}(임원)"
+    if row.get("늦참자") is True:
+        return f"{name}(늦참)"
+    if name in duplicate_names:
+        dept = str(row.get("학과", ""))
+        if dept and dept not in ("미상", "nan", ""):
+            return f"{name}({dept})"
+    return name
+
+
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """
+    자리배치 결과를 엑셀로 직렬화한다.
+    - 시트1 '자리배치': 각 행이 한 조. 첫 셀은 'N조', 이후 셀마다 이름 하나씩.
+    - 시트2 '테이블_요약': 조별 인원·E/I 수 요약.
+    이름 표시 규칙: 임원→이름(임원), 늦참→이름(늦참), 동명이인→이름(학과).
+    학번·성격·학과는 표시하지 않음.
+    """
+    # 동명이인 판별 (df 전체 기준)
+    name_counts = df["이름"].astype(str).value_counts()
+    duplicate_names: set = set(name_counts[name_counts > 1].index)
+
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        # 시트1: 테이블별 전체 목록
-        df.to_excel(writer, index=False, sheet_name="자리배치_전체")
+    wb = openpyxl.Workbook()
 
-        # 시트2: 테이블별 요약 (테이블_번호 × 이름·EI·성별)
-        summary_rows = []
-        for t_num, grp in df.groupby("테이블_번호"):
-            members = ", ".join(
-                f"{r['이름']}({r['EI']}/{r['성별']})"
-                for _, r in grp.iterrows()
-            )
-            e_cnt = (grp["EI"] == "E").sum()
-            i_cnt = (grp["EI"] == "I").sum()
-            summary_rows.append({
-                "테이블": t_num,
-                "인원": len(grp),
-                "E수": e_cnt,
-                "I수": i_cnt,
-                "구성": members,
-            })
-        pd.DataFrame(summary_rows).to_excel(writer, index=False, sheet_name="테이블_요약")
+    # ── 시트1: 조별 이름 셀 분리 ──────────────────────────────
+    ws1 = wb.active
+    ws1.title = "자리배치"
 
+    for t_num, grp in df.groupby("테이블_번호"):
+        row_data = [f"{t_num}조"] + [
+            _format_name_for_excel(r, duplicate_names)
+            for _, r in grp.iterrows()
+        ]
+        ws1.append(row_data)
+
+    # ── 시트2: 테이블 요약 ────────────────────────────────────
+    ws2 = wb.create_sheet("테이블_요약")
+    ws2.append(["테이블", "인원", "E수", "I수"])
+    for t_num, grp in df.groupby("테이블_번호"):
+        e_cnt = int((grp.get("EI", pd.Series()) == "E").sum())
+        i_cnt = int((grp.get("EI", pd.Series()) == "I").sum())
+        ws2.append([f"{t_num}조", len(grp), e_cnt, i_cnt])
+
+    wb.save(buf)
     return buf.getvalue()
 
 
@@ -740,12 +802,11 @@ def reanalyze_final(
         "[외향형 판정 조건 — 아래 중 하나라도 해당하면 외향형으로 판단하세요]\n"
         "  ① 면접관이 '말을 잘한다', '발표력이 좋다', '활발하다', '말이 많다', '적극적' 등 언어 표현력·에너지를 직접 언급\n"
         "  ② 면접관이 팀장·조장·리더 역할을 언급하거나 주도성을 긍정적으로 평가\n"
-        "  ③ 면접 점수가 높음 (점수 자체가 높으면 면접장에서 자신을 잘 표현했다는 신호이므로 외향형 가능성이 높음)\n"
-        "  ④ 자소서에서 팀장·발표·MC 등 리더/스피커 역할 경험이 구체적으로 확인됨\n\n"
+        "  ③ 자소서에서 팀장·발표·MC 등 리더/스피커 역할 경험이 구체적으로 확인됨\n\n"
         "[가중치]\n"
-        "• 면접 코멘트 > 면접 점수 > 자소서 판정 순으로 우선합니다.\n"
+        "• 면접 코멘트 > 자소서 판정 순으로 우선합니다.\n"
         "• 면접 데이터와 자소서 판정이 충돌하면 면접 데이터를 따르세요.\n"
-        "• 위 ①~④ 중 근거가 하나도 없을 때만 내향형으로 판단하세요.\n\n"
+        "• 위 ①~③ 중 근거가 하나도 없을 때만 내향형으로 판단하세요.\n\n"
         "다음 형식으로 정확히 3줄만 출력하세요:\n"
         "1줄: '외향형' 또는 '내향형' 한 단어\n"
         "2줄: 이 사람을 대표하는 성격 키워드를 쉼표로 나열 (예: 발표경험 多, 적극적, 리더십) — 20자 이내\n"
@@ -1460,6 +1521,7 @@ with tab3:
         _df_adj_src = st.session_state["df_personality"].copy()
 
         st.info(f"총 **{len(_df_adj_src)}명** — 이름 옆 토글로 외향/내향을 바꾼 뒤 **확정** 버튼을 눌러주세요.")
+        st.caption("💡 **성격 판정** 셀을 **더블클릭**하면 외향형/내향형을 드롭다운으로 바꿀 수 있어요.")
 
         # st.data_editor로 간편 수정
         _display_cols = [c for c in ["이름", "학과", "학번", "성격 판정", "근거 요약", "성격_키워드", "면접_평균점수"]
@@ -1679,7 +1741,7 @@ with tab4:
 
             # ── 엑셀 다운로드 ────────────────────────────────
             st.divider()
-            excel_bytes = to_excel_bytes(df_seated[display_cols + ["근거 요약"]])
+            excel_bytes = to_excel_bytes(df_seated)
             st.download_button(
                 label="엑셀로 다운로드",
                 data=excel_bytes,
